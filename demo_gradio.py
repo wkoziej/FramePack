@@ -12,6 +12,7 @@ import safetensors.torch as sf
 import numpy as np
 import argparse
 import math
+import sys
 
 from PIL import Image
 from diffusers import AutoencoderKLHunyuanVideo
@@ -29,10 +30,28 @@ from diffusers_helper.bucket_tools import find_nearest_bucket
 
 
 parser = argparse.ArgumentParser()
+# Gradio server options
 parser.add_argument('--share', action='store_true')
 parser.add_argument("--server", type=str, default='0.0.0.0')
 parser.add_argument("--port", type=int, required=False)
 parser.add_argument("--inbrowser", action='store_true')
+
+# CLI mode options
+parser.add_argument('--cli', action='store_true', help='Run in CLI mode instead of Gradio interface')
+parser.add_argument('--input_image', '-i', type=str, help='Path to input image (CLI mode)')
+parser.add_argument('--prompt', '-p', type=str, help='Text prompt for video generation (CLI mode)')
+parser.add_argument('--negative_prompt', '-n', type=str, default="", help='Negative prompt (CLI mode)')
+parser.add_argument('--seed', '-s', type=int, default=31337, help='Random seed (CLI mode)')
+parser.add_argument('--length', '-l', type=float, default=5.0, help='Video length in seconds (CLI mode)')
+parser.add_argument('--latent_window_size', type=int, default=9, help='Latent window size (CLI mode)')
+parser.add_argument('--steps', type=int, default=25, help='Number of sampling steps (CLI mode)')
+parser.add_argument('--cfg', type=float, default=1.0, help='CFG scale (CLI mode)')
+parser.add_argument('--distilled_cfg', type=float, default=10.0, help='Distilled CFG scale (CLI mode)')
+parser.add_argument('--cfg_rescale', type=float, default=0.0, help='CFG rescale (CLI mode)')
+parser.add_argument('--gpu_memory', type=float, default=6.0, help='GPU memory preservation in GB (CLI mode)')
+parser.add_argument('--no_teacache', action='store_true', help='Disable TeaCache (CLI mode)')
+parser.add_argument('--mp4_crf', type=int, default=16, help='MP4 compression level (CLI mode)')
+parser.add_argument('--output', '-o', type=str, help='Output video path (CLI mode)')
 args = parser.parse_args()
 
 # for win desktop probably use --server 127.0.0.1 --inbrowser
@@ -347,6 +366,104 @@ def end_process():
     stream.input_queue.push('end')
 
 
+def run_cli():
+    """Run in CLI mode"""
+    from PIL import Image
+    import numpy as np
+    
+    # Validate CLI arguments
+    if not args.input_image:
+        print("❌ Error: --input_image is required in CLI mode")
+        sys.exit(1)
+    if not args.prompt:
+        print("❌ Error: --prompt is required in CLI mode")
+        sys.exit(1)
+    if not os.path.exists(args.input_image):
+        print(f"❌ Error: Image file '{args.input_image}' not found!")
+        sys.exit(1)
+    
+    print("🎬 FramePack CLI Video Generator")
+    print("=" * 50)
+    print(f"Input image: {args.input_image}")
+    print(f"Prompt: {args.prompt}")
+    print(f"Video length: {args.length} seconds")
+    print(f"Seed: {args.seed}")
+    print(f"Steps: {args.steps}")
+    print(f"Use TeaCache: {not args.no_teacache}")
+    print("=" * 50)
+    
+    try:
+        # Load input image
+        print("Loading input image...")
+        image = Image.open(args.input_image)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        input_image = np.array(image)
+        print(f"Image loaded: {input_image.shape}")
+        
+        # Create new stream for CLI
+        global stream
+        stream = AsyncStream()
+        
+        # Call worker function
+        print("Starting video generation...")
+        worker(
+            input_image=input_image,
+            prompt=args.prompt,
+            n_prompt=args.negative_prompt,
+            seed=args.seed,
+            total_second_length=args.length,
+            latent_window_size=args.latent_window_size,
+            steps=args.steps,
+            cfg=args.cfg,
+            gs=args.distilled_cfg,
+            rs=args.cfg_rescale,
+            gpu_memory_preservation=args.gpu_memory,
+            use_teacache=not args.no_teacache,
+            mp4_crf=args.mp4_crf
+        )
+        
+        # Wait for completion and get the final output
+        output_filename = None
+        while True:
+            flag, data = stream.output_queue.next()
+            
+            if flag == 'file':
+                output_filename = data
+                print(f"Video section saved: {output_filename}")
+            
+            if flag == 'progress':
+                preview, desc, html = data
+                if desc:
+                    # Clean up HTML tags for CLI output
+                    import re
+                    clean_desc = re.sub('<[^<]+?>', '', desc)
+                    print(f"Progress: {clean_desc}")
+            
+            if flag == 'end':
+                break
+        
+        if output_filename:
+            # If custom output path specified, copy/rename the final file
+            if args.output:
+                import shutil
+                shutil.copy2(output_filename, args.output)
+                print(f"\n🎉 Success! Video saved to: {args.output}")
+            else:
+                print(f"\n🎉 Success! Video saved to: {output_filename}")
+        else:
+            print("\n⚠️  Generation completed but no output file found")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️  Generation interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n💥 Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 quick_prompts = [
     'The girl dances gracefully, with clear movements, full of charm.',
     'A character doing some simple body movements.',
@@ -354,6 +471,12 @@ quick_prompts = [
 quick_prompts = [[x] for x in quick_prompts]
 
 
+# Check if CLI mode is requested
+if args.cli:
+    run_cli()
+    sys.exit(0)
+
+# Continue with Gradio interface
 css = make_progress_bar_css()
 block = gr.Blocks(css=css).queue()
 with block:
