@@ -316,6 +316,24 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
             save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=mp4_crf)
 
+            # Clean up previous intermediate files
+            try:
+                import glob
+                # Find all files with same job_id but different frame counts
+                pattern = os.path.join(outputs_folder, f'{job_id}_*.mp4')
+                existing_files = glob.glob(pattern)
+                
+                for existing_file in existing_files:
+                    # Don't delete the file we just created
+                    if existing_file != output_filename:
+                        try:
+                            os.remove(existing_file)
+                            print(f'🗑️  Removed intermediate file: {os.path.basename(existing_file)}')
+                        except OSError as e:
+                            print(f'Warning: Could not remove {existing_file}: {e}')
+            except Exception as e:
+                print(f'Warning: Error cleaning up intermediate files: {e}')
+
             print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
             stream.output_queue.push(('file', output_filename))
